@@ -20,18 +20,48 @@ jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
+      - name: Require app config
+        if: inputs.dry_run != true
+        env:
+          APP_ID: ${{ vars.WILE_E_SYNC_APP_ID }}
+          APP_KEY: ${{ secrets.WILE_E_SYNC_APP_PRIVATE_KEY }}
+        run: |
+          if [ -z "$APP_ID" ] || [ -z "$APP_KEY" ]; then
+            echo "WILE_E_SYNC_APP_ID variable and WILE_E_SYNC_APP_PRIVATE_KEY secret are required for non-dry-run" >&2
+            exit 1
+          fi
+
+      - name: Create app token
+        id: app
+        if: inputs.dry_run != true
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ vars.WILE_E_SYNC_APP_ID }}
+          private-key: ${{ secrets.WILE_E_SYNC_APP_PRIVATE_KEY }}
+          owner: Qumulo-IT
+          repositories: step-ca,wile-e
+
+      - name: Resolve git identity
+        id: ident
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token || github.token }}
+          SLUG: ${{ steps.app.outputs.app-slug }}
+        run: |
+          if [ -n "$SLUG" ]; then
+            uid=$(gh api "/users/${SLUG}[bot]" --jq .id)
+            echo "name=${SLUG}[bot]" >> "$GITHUB_OUTPUT"
+            echo "email=${uid}+${SLUG}[bot]@users.noreply.github.com" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=wile-e sync" >> "$GITHUB_OUTPUT"
+            echo "email=wile-e-sync@users.noreply.github.com" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Resolve target tag
         id: tag
         env:
           GH_TOKEN: ${{ github.token }}
           INPUT_TAG: ${{ inputs.tag }}
-          DRY_RUN: ${{ inputs.dry_run }}
-          HAVE_TOKEN: ${{ secrets.WILE_E_PR_TOKEN != '' }}
         run: |
-          if [ "$DRY_RUN" != "true" ] && [ "$HAVE_TOKEN" != "true" ]; then
-            echo "WILE_E_PR_TOKEN secret is required for non-dry-run" >&2
-            exit 1
-          fi
           tag="${INPUT_TAG:-$(gh api repos/smallstep/certificates/releases/latest --jq .tag_name)}"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "wile_tag=$tag-wile.1" >> "$GITHUB_OUTPUT"
@@ -40,7 +70,7 @@ jobs:
         with:
           ref: wile-e/patches
           fetch-depth: 0
-          token: ${{ secrets.WILE_E_PR_TOKEN || github.token }}
+          token: ${{ steps.app.outputs.token || github.token }}
 
       - name: Skip if already published
         id: check
@@ -52,8 +82,8 @@ jobs:
       - name: Rebase patch onto upstream tag
         if: steps.check.outputs.skip != 'true'
         run: |
-          git config user.name "wile-e sync"
-          git config user.email "wile-e-sync@users.noreply.github.com"
+          git config user.name "${{ steps.ident.outputs.name }}"
+          git config user.email "${{ steps.ident.outputs.email }}"
           git remote add upstream https://github.com/smallstep/certificates.git
           git fetch upstream --tags
           git rebase --onto "${{ steps.tag.outputs.tag }}" HEAD~1
@@ -80,7 +110,9 @@ jobs:
       - name: Open PR in wile-e
         if: inputs.dry_run != true
         env:
-          GH_TOKEN: ${{ secrets.WILE_E_PR_TOKEN }}
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          GIT_NAME: ${{ steps.ident.outputs.name }}
+          GIT_EMAIL: ${{ steps.ident.outputs.email }}
           TAG: ${{ steps.tag.outputs.tag }}
           WILE_TAG: ${{ steps.tag.outputs.wile_tag }}
         run: |
@@ -96,7 +128,7 @@ jobs:
           go mod edit -require="github.com/smallstep/certificates@$TAG" \
             -replace="github.com/smallstep/certificates=github.com/Qumulo-IT/step-ca@$WILE_TAG"
           go mod tidy
-          git -c user.name="wile-e sync" -c user.email="wile-e-sync@users.noreply.github.com" \
+          git -c user.name="$GIT_NAME" -c user.email="$GIT_EMAIL" \
             commit -am "Bump step-ca to $TAG"
           git push --force origin "$branch"
           gh pr create --title "Bump step-ca to $TAG" \
