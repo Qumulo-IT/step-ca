@@ -38,7 +38,7 @@ func New(db nosqlDB.DB) (*DB, error) {
 		challengeTable, nonceTable, orderTable, ordersByAccountIDTable,
 		certTable, certBySerialTable, externalAccountKeyTable,
 		externalAccountKeyIDsByReferenceTable, externalAccountKeyIDsByProvisionerIDTable,
-		wireDpopTokenTable, wireOidcTokenTable,
+		wireDpopTokenTable, wireOidcTokenTable, processingOrderTable,
 	}
 	for _, b := range tables {
 		if err := db.CreateTable(b); err != nil {

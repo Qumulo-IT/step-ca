@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"reflect"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/coreos/go-systemd/v22/daemon"
@@ -145,14 +146,18 @@ func WithQuiet(quiet bool) Option {
 // CA is the type used to build the complete certificate authority. It builds
 // the HTTP server, set ups the middlewares and the HTTP handlers.
 type CA struct {
-	auth        *authority.Authority
-	config      *config.Config
-	srv         *server.Server
-	insecureSrv *server.Server
-	metricsSrv  *server.Server
-	opts        *options
-	renewer     *TLSRenewer
-	compactStop chan struct{}
+	auth          *authority.Authority
+	config        *config.Config
+	srv           *server.Server
+	insecureSrv   *server.Server
+	metricsSrv    *server.Server
+	opts          *options
+	renewer       *TLSRenewer
+	compactStop   chan struct{}
+	acmeDB        acme.DB
+	baseContext   context.Context
+	sweeperMu     sync.Mutex
+	sweeperCancel context.CancelFunc
 }
 
 // New creates and initializes the CA with the given configuration and options.
@@ -357,6 +362,9 @@ func (ca *CA) Init(cfg *config.Config) (*CA, error) {
 	// Create context with all the necessary values.
 	baseContext := buildContext(auth, scepAuthority, acmeDB, acmeLinker)
 
+	ca.acmeDB = acmeDB
+	ca.baseContext = baseContext
+
 	ca.srv = server.New(cfg.Address, handler, tlsConfig)
 	ca.srv.BaseContext = func(net.Listener) context.Context {
 		return baseContext
@@ -451,6 +459,8 @@ func (ca *CA) Run() error {
 		}
 	}
 
+	ca.startFinalizeSweeper(ca.baseContext, ca.acmeDB, ca.auth)
+
 	eg := new(errgroup.Group)
 	eg.Go(func() error {
 		ca.runCompactJob()
@@ -496,9 +506,51 @@ func (ca *CA) Run() error {
 	return err
 }
 
+// runFinalizeSweeper is replaced in tests.
+var runFinalizeSweeper = acme.RunFinalizeSweeper
+
+// startFinalizeSweeper starts the ACME async finalize sweeper if db is set.
+func (ca *CA) startFinalizeSweeper(baseCtx context.Context, db acme.DB, auth *authority.Authority) {
+	if db == nil {
+		return
+	}
+	ca.sweeperMu.Lock()
+	defer ca.sweeperMu.Unlock()
+	if ca.sweeperCancel != nil {
+		ca.sweeperCancel()
+	}
+	ctx, cancel := context.WithCancel(baseCtx)
+	ca.sweeperCancel = cancel
+	go runFinalizeSweeper(ctx, db, auth)
+}
+
+// reloadFinalizeSweeper restarts a running ACME async finalize sweeper with
+// the database and authority of newCA.
+func (ca *CA) reloadFinalizeSweeper(newCA *CA) {
+	if ca.stopFinalizeSweeper() {
+		ca.startFinalizeSweeper(newCA.baseContext, newCA.acmeDB, newCA.auth)
+	}
+	ca.acmeDB = newCA.acmeDB
+	ca.baseContext = newCA.baseContext
+}
+
+// stopFinalizeSweeper stops the ACME async finalize sweeper and reports
+// whether it was running.
+func (ca *CA) stopFinalizeSweeper() bool {
+	ca.sweeperMu.Lock()
+	defer ca.sweeperMu.Unlock()
+	if ca.sweeperCancel == nil {
+		return false
+	}
+	ca.sweeperCancel()
+	ca.sweeperCancel = nil
+	return true
+}
+
 // Stop stops the CA calling to the server Shutdown method.
 func (ca *CA) Stop() error {
 	close(ca.compactStop)
+	ca.stopFinalizeSweeper()
 	if ca.renewer != nil {
 		ca.renewer.Stop()
 	}
@@ -595,6 +647,7 @@ func (ca *CA) Reload() error {
 		ca.renewer.Stop()
 	}
 
+	ca.reloadFinalizeSweeper(newCA)
 	ca.auth.CloseForReload()
 	ca.auth = newCA.auth
 	ca.config = newCA.config

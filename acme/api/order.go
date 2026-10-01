@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -160,6 +161,11 @@ func (f *FinalizeRequest) Validate() error {
 }
 
 var defaultOrderExpiry = time.Hour * 24
+
+// processingRetryAfter is the Retry-After value, in seconds, sent while an
+// order is processing.
+const processingRetryAfter = 5
+
 var defaultOrderBackdate = time.Minute
 
 // NewOrder ACME api for creating a new order.
@@ -429,6 +435,9 @@ func GetOrder(w http.ResponseWriter, r *http.Request) {
 	linker.LinkOrder(ctx, o)
 
 	w.Header().Set("Location", linker.GetLink(ctx, acme.OrderLinkType, o.ID))
+	if o.Status == acme.StatusProcessing {
+		w.Header().Set("Retry-After", strconv.Itoa(processingRetryAfter))
+	}
 	render.JSON(w, r, o)
 }
 
@@ -481,7 +490,12 @@ func FinalizeOrder(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ca := mustAuthority(ctx)
-	if err = o.Finalize(ctx, db, fr.csr, ca, prov); err != nil {
+	if acme.IsAsyncFinalizeEnabled(prov) {
+		err = o.FinalizeAsync(ctx, db, fr.csr, ca, prov)
+	} else {
+		err = o.Finalize(ctx, db, fr.csr, ca, prov)
+	}
+	if err != nil {
 		render.Error(w, r, acme.WrapErrorISE(err, "error finalizing order"))
 		return
 	}
@@ -489,6 +503,9 @@ func FinalizeOrder(w http.ResponseWriter, r *http.Request) {
 	linker.LinkOrder(ctx, o)
 
 	w.Header().Set("Location", linker.GetLink(ctx, acme.OrderLinkType, o.ID))
+	if o.Status == acme.StatusProcessing {
+		w.Header().Set("Retry-After", strconv.Itoa(processingRetryAfter))
+	}
 	render.JSON(w, r, o)
 }
 

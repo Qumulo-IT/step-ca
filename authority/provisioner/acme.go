@@ -105,6 +105,9 @@ type ACME struct {
 	// EAB will be verified. If set to false and an EAB is provided, it is
 	// not verified. Defaults to false.
 	RequireEAB bool `json:"requireEAB,omitempty"`
+	// AsyncFinalize makes order finalization return immediately with status
+	// "processing" while the certificate is issued in the background.
+	AsyncFinalize bool `json:"asyncFinalize,omitempty"`
 	// Challenges contains the enabled challenges for this provisioner. If this
 	// value is not set the default http-01, dns-01 and tls-alpn-01 challenges
 	// will be enabled, device-attest-01, wire-oidc-01 and wire-dpop-01 will be
@@ -130,6 +133,12 @@ func (p ACME) GetID() string {
 		return p.ID
 	}
 	return p.GetIDForToken()
+}
+
+// IsAsyncFinalizeEnabled returns true if orders should be finalized
+// asynchronously.
+func (p *ACME) IsAsyncFinalizeEnabled() bool {
+	return p != nil && p.AsyncFinalize
 }
 
 // GetIDForToken returns an identifier that will be used to load the provisioner

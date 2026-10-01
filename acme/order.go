@@ -82,6 +82,14 @@ func (o *Order) UpdateStatus(ctx context.Context, db DB) error {
 		return nil
 	case StatusValid:
 		return nil
+	case StatusProcessing:
+		// Check expiry so orders orphaned mid-issuance eventually become invalid.
+		if now.After(o.ExpiresAt) {
+			o.Status = StatusInvalid
+			o.Error = NewError(ErrorMalformedType, "order has expired")
+			break
+		}
+		return nil
 	case StatusReady:
 		// Check expiry
 		if now.After(o.ExpiresAt) {
@@ -180,27 +188,51 @@ func (o *Order) Finalize(ctx context.Context, db DB, csr *x509.CertificateReques
 		return nil
 	case StatusPending:
 		return NewError(ErrorOrderNotReadyType, "order %s is not ready", o.ID)
+	case StatusProcessing:
+		return NewError(ErrorOrderNotReadyType, "order %s is already being processed", o.ID)
 	case StatusReady:
 		break
 	default:
 		return NewErrorISE("unexpected status %s for order %s", o.Status, o.ID)
 	}
 
+	return o.issue(ctx, db, csr, auth, p)
+}
+
+// issue validates the CSR against the order, signs the certificate and marks
+// the order valid. Callers must have verified that the order is ready.
+func (o *Order) issue(ctx context.Context, db DB, csr *x509.CertificateRequest, auth CertificateAuthority, p Provisioner) error {
+	req, err := o.prepareIssue(ctx, db, csr, p)
+	if err != nil {
+		return err
+	}
+	return o.sign(ctx, db, req, auth)
+}
+
+// issueRequest holds a validated CSR and the options used to sign it.
+type issueRequest struct {
+	csr     *x509.CertificateRequest
+	signOps []provisioner.SignOption
+}
+
+// prepareIssue validates the CSR against the order and builds the signing
+// options. It does not modify the order.
+func (o *Order) prepareIssue(ctx context.Context, db DB, csr *x509.CertificateRequest, p Provisioner) (*issueRequest, error) {
 	// Get key fingerprint if any. And then compare it with the CSR fingerprint.
 	//
 	// In device-attest-01 challenges we should check that the keys in the CSR
 	// and the attestation certificate are the same.
 	fingerprint, err := o.getAuthorizationFingerprint(ctx, db)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if fingerprint != "" {
 		fp, err := keyutil.Fingerprint(csr.PublicKey)
 		if err != nil {
-			return WrapErrorISE(err, "error calculating key fingerprint")
+			return nil, WrapErrorISE(err, "error calculating key fingerprint")
 		}
 		if subtle.ConstantTimeCompare([]byte(fingerprint), []byte(fp)) == 0 {
-			return NewError(ErrorUnauthorizedType, "order %s csr does not match the attested key", o.ID)
+			return nil, NewError(ErrorUnauthorizedType, "order %s csr does not match the attested key", o.ID)
 		}
 	}
 
@@ -212,24 +244,24 @@ func (o *Order) Finalize(ctx context.Context, db DB, csr *x509.CertificateReques
 	if o.containsWireIdentifiers() {
 		wireDB, ok := db.(WireDB)
 		if !ok {
-			return fmt.Errorf("db %T is not a WireDB", db)
+			return nil, fmt.Errorf("db %T is not a WireDB", db)
 		}
 		subject, err := createWireSubject(o, csr)
 		if err != nil {
-			return fmt.Errorf("failed creating Wire subject: %w", err)
+			return nil, fmt.Errorf("failed creating Wire subject: %w", err)
 		}
 		data.SetSubject(subject)
 
 		// Inject Wire's custom challenges into the template once they have been validated
 		dpop, err := wireDB.GetDpopToken(ctx, o.ID)
 		if err != nil {
-			return fmt.Errorf("failed getting Wire DPoP token: %w", err)
+			return nil, fmt.Errorf("failed getting Wire DPoP token: %w", err)
 		}
 		data.Set("Dpop", dpop)
 
 		oidc, err := wireDB.GetOidcToken(ctx, o.ID)
 		if err != nil {
-			return fmt.Errorf("failed getting Wire OIDC token: %w", err)
+			return nil, fmt.Errorf("failed getting Wire OIDC token: %w", err)
 		}
 		data.Set("Oidc", oidc)
 	} else {
@@ -250,7 +282,7 @@ func (o *Order) Finalize(ctx context.Context, db DB, csr *x509.CertificateReques
 			// could result in unauthorized access if a relying system relies on the Common
 			// Name in its authorization logic.
 			if csr.Subject.CommonName != "" && csr.Subject.CommonName != permanentIdentifier {
-				return NewError(ErrorBadCSRType, "CSR Subject Common Name does not match identifiers exactly: "+
+				return nil, NewError(ErrorBadCSRType, "CSR Subject Common Name does not match identifiers exactly: "+
 					"CSR Subject Common Name = %s, Order Permanent Identifier = %s", csr.Subject.CommonName, permanentIdentifier)
 			}
 			break
@@ -271,7 +303,7 @@ func (o *Order) Finalize(ctx context.Context, db DB, csr *x509.CertificateReques
 		defaultTemplate = x509util.DefaultLeafTemplate
 		sans, err := o.sans(csr)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		data.SetSubjectAlternativeNames(sans...)
 	}
@@ -280,7 +312,7 @@ func (o *Order) Finalize(ctx context.Context, db DB, csr *x509.CertificateReques
 	ctx = provisioner.NewContextWithMethod(ctx, provisioner.SignMethod)
 	signOps, err := p.AuthorizeSign(ctx, "")
 	if err != nil {
-		return WrapErrorISE(err, "error retrieving authorization options from ACME provisioner")
+		return nil, WrapErrorISE(err, "error retrieving authorization options from ACME provisioner")
 	}
 	// Unlike most of the provisioners, ACME's AuthorizeSign method doesn't
 	// define the templates, and the template data used in WebHooks is not
@@ -293,18 +325,25 @@ func (o *Order) Finalize(ctx context.Context, db DB, csr *x509.CertificateReques
 
 	templateOptions, err := provisioner.CustomTemplateOptions(p.GetOptions(), data, defaultTemplate)
 	if err != nil {
-		return WrapErrorISE(err, "error creating template options from ACME provisioner")
+		return nil, WrapErrorISE(err, "error creating template options from ACME provisioner")
 	}
 
 	// Build extra signing options.
 	signOps = append(signOps, templateOptions)
 	signOps = append(signOps, extraOptions...)
 
+	return &issueRequest{csr: csr, signOps: signOps}, nil
+}
+
+// sign signs the certificate for a prepared request, stores it and marks the
+// order valid.
+func (o *Order) sign(ctx context.Context, db DB, req *issueRequest, auth CertificateAuthority) error {
+	ctx = provisioner.NewContextWithMethod(ctx, provisioner.SignMethod)
 	// Sign a new certificate.
-	certChain, err := auth.SignWithContext(ctx, csr, provisioner.SignOptions{
+	certChain, err := auth.SignWithContext(ctx, req.csr, provisioner.SignOptions{
 		NotBefore: provisioner.NewTimeDuration(o.NotBefore),
 		NotAfter:  provisioner.NewTimeDuration(o.NotAfter),
-	}, signOps...)
+	}, req.signOps...)
 	if err != nil {
 		// Add subproblem for webhook errors, others can be added later.
 		var webhookErr *webhook.Error
