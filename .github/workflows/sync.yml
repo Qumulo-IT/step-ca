@@ -71,13 +71,23 @@ jobs:
         if: steps.check.outputs.skip != 'true' && inputs.dry_run != true
         run: git push --force-with-lease origin HEAD:wile-e/patches
 
-      - name: Open PR in wile-e
+      - name: Tag release
         if: steps.check.outputs.skip != 'true' && inputs.dry_run != true
+        run: |
+          git tag "${{ steps.tag.outputs.wile_tag }}"
+          git push origin "${{ steps.tag.outputs.wile_tag }}"
+
+      - name: Open PR in wile-e
+        if: inputs.dry_run != true
         env:
           GH_TOKEN: ${{ secrets.WILE_E_PR_TOKEN }}
           TAG: ${{ steps.tag.outputs.tag }}
           WILE_TAG: ${{ steps.tag.outputs.wile_tag }}
         run: |
+          if [ "$(gh pr list -R Qumulo-IT/wile-e --head "deps/step-ca-$TAG" --state all --json number -q length)" != "0" ]; then
+            echo "PR for deps/step-ca-$TAG already exists"
+            exit 0
+          fi
           gh auth setup-git
           gh repo clone Qumulo-IT/wile-e wile-e
           cd wile-e
@@ -88,17 +98,11 @@ jobs:
           go mod tidy
           git -c user.name="wile-e sync" -c user.email="wile-e-sync@users.noreply.github.com" \
             commit -am "Bump step-ca to $TAG"
-          git push origin "$branch"
+          git push --force origin "$branch"
           gh pr create --title "Bump step-ca to $TAG" \
             --body "Rebased async finalize patch onto smallstep/certificates $TAG ($WILE_TAG)." \
             --assignee evilhamsterman \
             --reviewer hasenek,bcalhoun-qumulo,cliffordmiller,lwnemesis
-
-      - name: Tag release
-        if: steps.check.outputs.skip != 'true' && inputs.dry_run != true
-        run: |
-          git tag "${{ steps.tag.outputs.wile_tag }}"
-          git push origin "${{ steps.tag.outputs.wile_tag }}"
 
       - name: Open issue on failure
         if: failure()
