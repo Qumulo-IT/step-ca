@@ -1,0 +1,99 @@
+name: sync-upstream
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Upstream tag to rebase onto (default: latest release)"
+        required: false
+      dry_run:
+        description: "Rebase and test only; do not push or open PRs"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve target tag
+        id: tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          tag="${INPUT_TAG:-$(gh api repos/smallstep/certificates/releases/latest --jq .tag_name)}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "wile_tag=$tag-wile.1" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: wile-e/patches
+          fetch-depth: 0
+
+      - name: Skip if already published
+        id: check
+        run: |
+          if git ls-remote --exit-code --tags origin "refs/tags/${{ steps.tag.outputs.wile_tag }}" >/dev/null; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Rebase patch onto upstream tag
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          git config user.name "wile-e sync"
+          git config user.email "wile-e-sync@users.noreply.github.com"
+          git remote add upstream https://github.com/smallstep/certificates.git
+          git fetch upstream --tags
+          git rebase --onto "${{ steps.tag.outputs.tag }}" HEAD~1
+
+      - uses: actions/setup-go@v5
+        if: steps.check.outputs.skip != 'true'
+        with:
+          go-version-file: go.mod
+
+      - name: Test
+        if: steps.check.outputs.skip != 'true'
+        run: go test ./acme/... ./ca/... ./authority/provisioner/...
+
+      - name: Publish branch and tag
+        if: steps.check.outputs.skip != 'true' && inputs.dry_run != true
+        run: |
+          git push --force-with-lease origin HEAD:wile-e/patches
+          git tag "${{ steps.tag.outputs.wile_tag }}"
+          git push origin "${{ steps.tag.outputs.wile_tag }}"
+
+      - name: Open PR in wile-e
+        if: steps.check.outputs.skip != 'true' && inputs.dry_run != true
+        env:
+          GH_TOKEN: ${{ secrets.WILE_E_PR_TOKEN }}
+          TAG: ${{ steps.tag.outputs.tag }}
+          WILE_TAG: ${{ steps.tag.outputs.wile_tag }}
+        run: |
+          gh repo clone Qumulo-IT/wile-e wile-e
+          cd wile-e
+          branch="deps/step-ca-$TAG"
+          git switch -c "$branch"
+          go mod edit -require="github.com/smallstep/certificates@$TAG" \
+            -replace="github.com/smallstep/certificates=github.com/Qumulo-IT/step-ca@$WILE_TAG"
+          go mod tidy
+          git -c user.name="wile-e sync" -c user.email="wile-e-sync@users.noreply.github.com" \
+            commit -am "Bump step-ca to $TAG"
+          git push origin "$branch"
+          gh pr create --title "Bump step-ca to $TAG" \
+            --body "Rebased async finalize patch onto smallstep/certificates $TAG ($WILE_TAG)." \
+            --assignee evilhamsterman \
+            --reviewer hasenek,bcalhoun-qumulo,cliffordmiller,lwnemesis
+
+      - name: Open issue on failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh issue create --repo "${{ github.repository }}" \
+            --title "Sync to ${{ steps.tag.outputs.tag }} failed" \
+            --body "See ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
