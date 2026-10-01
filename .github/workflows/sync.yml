@@ -25,7 +25,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           INPUT_TAG: ${{ inputs.tag }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          HAVE_TOKEN: ${{ secrets.WILE_E_PR_TOKEN != '' }}
         run: |
+          if [ "$DRY_RUN" != "true" ] && [ "$HAVE_TOKEN" != "true" ]; then
+            echo "WILE_E_PR_TOKEN secret is required for non-dry-run" >&2
+            exit 1
+          fi
           tag="${INPUT_TAG:-$(gh api repos/smallstep/certificates/releases/latest --jq .tag_name)}"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "wile_tag=$tag-wile.1" >> "$GITHUB_OUTPUT"
@@ -34,6 +40,7 @@ jobs:
         with:
           ref: wile-e/patches
           fetch-depth: 0
+          token: ${{ secrets.WILE_E_PR_TOKEN || github.token }}
 
       - name: Skip if already published
         id: check
@@ -60,12 +67,9 @@ jobs:
         if: steps.check.outputs.skip != 'true'
         run: go test ./acme/... ./ca/... ./authority/provisioner/...
 
-      - name: Publish branch and tag
+      - name: Publish branch
         if: steps.check.outputs.skip != 'true' && inputs.dry_run != true
-        run: |
-          git push --force-with-lease origin HEAD:wile-e/patches
-          git tag "${{ steps.tag.outputs.wile_tag }}"
-          git push origin "${{ steps.tag.outputs.wile_tag }}"
+        run: git push --force-with-lease origin HEAD:wile-e/patches
 
       - name: Open PR in wile-e
         if: steps.check.outputs.skip != 'true' && inputs.dry_run != true
@@ -74,6 +78,7 @@ jobs:
           TAG: ${{ steps.tag.outputs.tag }}
           WILE_TAG: ${{ steps.tag.outputs.wile_tag }}
         run: |
+          gh auth setup-git
           gh repo clone Qumulo-IT/wile-e wile-e
           cd wile-e
           branch="deps/step-ca-$TAG"
@@ -88,6 +93,12 @@ jobs:
             --body "Rebased async finalize patch onto smallstep/certificates $TAG ($WILE_TAG)." \
             --assignee evilhamsterman \
             --reviewer hasenek,bcalhoun-qumulo,cliffordmiller,lwnemesis
+
+      - name: Tag release
+        if: steps.check.outputs.skip != 'true' && inputs.dry_run != true
+        run: |
+          git tag "${{ steps.tag.outputs.wile_tag }}"
+          git push origin "${{ steps.tag.outputs.wile_tag }}"
 
       - name: Open issue on failure
         if: failure()
