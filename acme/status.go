@@ -14,7 +14,8 @@ var (
 	StatusDeactivated = Status("deactivated")
 	// StatusReady -- ready; e.g. for an Order that is ready to be finalized.
 	StatusReady = Status("ready")
+	// StatusProcessing -- processing; e.g. an Order whose certificate is being issued.
+	StatusProcessing = Status("processing")
 	//statusExpired     = "expired"
 	//statusActive      = "active"
-	//statusProcessing  = "processing"
 )
