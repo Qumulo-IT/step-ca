@@ -11,13 +11,41 @@ on:
         description: "Rebase and test only; do not push or open PRs"
         type: boolean
         default: true
+      verify_app:
+        description: "Only check the GitHub App token and its repository access"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
   issues: write
 
 jobs:
+  verify-app:
+    if: inputs.verify_app == true
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create app token
+        id: app
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ vars.WILE_E_SYNC_APP_ID }}
+          private-key: ${{ secrets.WILE_E_SYNC_APP_PRIVATE_KEY }}
+          owner: Qumulo-IT
+          repositories: step-ca,wile-e
+
+      - name: Check repository access
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          SLUG: ${{ steps.app.outputs.app-slug }}
+        run: |
+          repos=$(gh api /installation/repositories --jq '.repositories[].full_name' | sort | tr '\n' ' ')
+          echo "app ${SLUG}: ${repos}"
+          [ "$repos" = "Qumulo-IT/step-ca Qumulo-IT/wile-e " ]
+          gh api "/users/${SLUG}[bot]" --jq '"bot user id: \(.id)"'
+
   sync:
+    if: inputs.verify_app != true
     runs-on: ubuntu-latest
     steps:
       - name: Require app config
