@@ -14,5 +14,6 @@ The org disallows PATs; the workflow mints an installation token with `actions/c
 - Install on Qumulo-IT/step-ca and Qumulo-IT/wile-e only.
 - On Qumulo-IT/step-ca: repo variable `WILE_E_SYNC_APP_ID`, secret `WILE_E_SYNC_APP_PRIVATE_KEY`.
 - The failure issue uses `github.token`.
+- Check the app: `gh workflow run sync-upstream -R Qumulo-IT/step-ca -f verify_app=true`.
 
 Slack: when a bump PR is opened, the workflow posts to the incoming webhook in secret `WILE_E_SLACK_WEBHOOK_URL` (optional; skipped with a warning if unset).
