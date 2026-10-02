@@ -108,6 +108,7 @@ jobs:
           git push origin "${{ steps.tag.outputs.wile_tag }}"
 
       - name: Open PR in wile-e
+        id: pr
         if: inputs.dry_run != true
         env:
           GH_TOKEN: ${{ steps.app.outputs.token }}
@@ -131,10 +132,27 @@ jobs:
           git -c user.name="$GIT_NAME" -c user.email="$GIT_EMAIL" \
             commit -am "Bump step-ca to $TAG"
           git push --force origin "$branch"
-          gh pr create --title "Bump step-ca to $TAG" \
+          url=$(gh pr create --title "Bump step-ca to $TAG" \
             --body "Rebased async finalize patch onto smallstep/certificates $TAG ($WILE_TAG)." \
             --assignee evilhamsterman \
-            --reviewer hasenek,bcalhoun-qumulo,cliffordmiller,lwnemesis
+            --reviewer hasenek,bcalhoun-qumulo,cliffordmiller,lwnemesis)
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+
+      - name: Notify Slack
+        if: steps.pr.outputs.url != ''
+        continue-on-error: true
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.WILE_E_SLACK_WEBHOOK_URL }}
+          TAG: ${{ steps.tag.outputs.tag }}
+          PR_URL: ${{ steps.pr.outputs.url }}
+        run: |
+          if [ -z "$SLACK_WEBHOOK_URL" ]; then
+            echo "::warning::WILE_E_SLACK_WEBHOOK_URL not set; skipping Slack notification"
+            exit 0
+          fi
+          jq -n --arg tag "$TAG" --arg url "$PR_URL" \
+            '{text: "step-ca \($tag) released — patch rebased, tests passed. wile-e bump PR: \($url)"}' |
+            curl -fsS -X POST -H 'Content-Type: application/json' --data @- "$SLACK_WEBHOOK_URL"
 
       - name: Open issue on failure
         if: failure()
