@@ -92,7 +92,8 @@ jobs:
         run: |
           tag="${INPUT_TAG:-$(gh api repos/smallstep/certificates/releases/latest --jq .tag_name)}"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "wile_tag=$tag-wile.1" >> "$GITHUB_OUTPUT"
+          n=$(gh api "repos/${{ github.repository }}/git/matching-refs/tags/$tag-wile." --jq '.[].ref | sub(".*-wile\\."; "") | tonumber' | sort -n | tail -1)
+          echo "wile_tag=$tag-wile.${n:-1}" >> "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@v4
         with:
@@ -152,6 +153,10 @@ jobs:
           gh auth setup-git
           gh repo clone Qumulo-IT/wile-e wile-e
           cd wile-e
+          if grep -q "Qumulo-IT/step-ca $WILE_TAG\$" go.mod; then
+            echo "wile-e already uses $WILE_TAG"
+            exit 0
+          fi
           branch="deps/step-ca-$TAG"
           git switch -c "$branch"
           go mod edit -require="github.com/smallstep/certificates@$TAG" \
